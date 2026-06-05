@@ -140,6 +140,58 @@ def update_status(email, project_name, status_value):
             print(f"Failed to post status to {ip}:", e)
 
 
+def ask_llm(email, project_name, command, SERVICE_URLS):
+    """Try primary Gemini, then fallback to local LLM helpers."""
+    # Try primary Gemini service
+    try:
+        url = SERVICE_URLS['gemini'] + "/ask_gemini"
+        print(f"[ask_llm] Trying primary: {url}")
+        res = requests.post(url, json={"email": email, "project_name": project_name, "command": command}, timeout=60)
+        if res.status_code == 200:
+            res_json = res.json()
+            if email in res_json and res_json[email]:
+                return res_json[email]
+            print(f"[ask_llm] Primary returned empty or missing key, trying fallbacks...")
+    except Exception as e:
+        print(f"[ask_llm] Primary Gemini failed: {e}")
+
+    # Fallback 1: Local LLM Helper llama3.2 3B
+    try:
+        url = "http://192.168.50.4:8332/llama323db"
+        print(f"[ask_llm] Trying fallback 1: {url}")
+        res = requests.post(url, json={"email": email, "command": command}, timeout=60)
+        if res.status_code == 200:
+            res_json = res.json()
+            if email in res_json and res_json[email]:
+                return res_json[email]
+    except Exception as e:
+        print(f"[ask_llm] Fallback 1 (llama323db) failed: {e}")
+
+    # Fallback 2: Local LLM Helper Nemotron Chat
+    try:
+        url = "http://192.168.50.4:8332/nemotron_chat"
+        print(f"[ask_llm] Trying fallback 2: {url}")
+        res = requests.post(url, json={"email": email, "command": command}, timeout=60)
+        if res.status_code == 200:
+            res_json = res.json()
+            if email in res_json and res_json[email]:
+                return res_json[email]
+    except Exception as e:
+        print(f"[ask_llm] Fallback 2 (nemotron_chat) failed: {e}")
+
+    # Fallback 3: Direct local Ollama
+    try:
+        url = "http://localhost:11434/api/generate"
+        print(f"[ask_llm] Trying fallback 3 (Ollama): {url}")
+        res = requests.post(url, json={"model": "llama3.2:3B", "prompt": command, "stream": False}, timeout=60)
+        if res.status_code == 200:
+            return res.json().get("response", "")
+    except Exception as e:
+        print(f"[ask_llm] Fallback 3 (Ollama) failed: {e}")
+
+    raise RuntimeError("[ask_llm] All LLM endpoints failed.")
+
+
 def get_project_dir(email, project_name):
     return os.path.join(CLIENT_CODE_ROOT, email, project_name)
 
@@ -1317,16 +1369,10 @@ if __name__ == "__main__":
           "Return only the class name from the list."
         )
         try:
-          response = requests.post(
-            SERVICE_URLS['gemini'] + "/ask_gemini",
-            json={"email": email, "project_name": project_name, "command": prompt},
-            timeout=60
-          )
-          response.raise_for_status()
-          class_name = extract_gemini_text(response.json(), email)
+          class_name = ask_llm(email, project_name, prompt, SERVICE_URLS)
           if not class_name:
-            raise ValueError("Empty Gemini classification response")
-          return class_name
+            raise ValueError("Empty classification response")
+          return class_name.strip()
         except Exception as e:
           print(f"Error classifying component '{component_name}':", e)
           return None
@@ -1431,7 +1477,7 @@ if __name__ == "__main__":
                  categ_list = list(req_processor) #Getting the list category of the components from the list of the components serial device connection 
                  update_status(email, project_name, f"Selecting semantic category for {dev_name}...")
                  #Use AI select from the list first to get the cateogory from the components selection 
-                 aiagent_search = requests.post(SERVICE_URLS['gemini']+"/ask_gemini",json={"email":email,"project_name":project_name,"command":f"Select the category of the component {dev_name} from the list {categ_list} answer in single word selected from the list "}).json()[email]
+                 aiagent_search = ask_llm(email, project_name, f"Select the category of the component {dev_name} from the list {categ_list} answer in single word selected from the list ", SERVICE_URLS)
                  print("AI selected category: ",aiagent_search)
                  semanticselect = semantic_processing(aiagent_search,categ_list) #Getting the semantic serial device connection from the list by semantically selection 
                  print("Semantic select: ",semanticselect) 
@@ -1483,7 +1529,7 @@ if __name__ == "__main__":
                                      
                                      if target_dev_name not in device_catcheck or device_catcheck[target_dev_name] not in commu_mapnode.keys():
                                          categ_list = list(commu_mapnode.keys())
-                                         aiagent_search = requests.post(SERVICE_URLS['gemini']+"/ask_gemini",json={"email":email,"project_name":project_name,"command":f"Select the category of the component {target_dev_name} from the list {categ_list} answer in single word selected from the list "}).json()[email]
+                                         aiagent_search = ask_llm(email, project_name, f"Select the category of the component {target_dev_name} from the list {categ_list} answer in single word selected from the list ", SERVICE_URLS)
                                          semanticselect_target = semantic_processing(aiagent_search,categ_list)
                                          # Cache the result regardless of what it is, so we never process it in AI search again
                                          try:
@@ -1668,13 +1714,7 @@ if __name__ == "__main__":
           middleware_error_reason = ""
           for attempt in range(3):
             try:
-              response = requests.post(
-                SERVICE_URLS['gemini'] + "/ask_gemini",
-                json={"email": email, "project_name": project_name, "command": sbc_prompt},
-                timeout=120,
-              )
-              response.raise_for_status()
-              sbc_text = extract_gemini_text(response.json(), email)
+              sbc_text = ask_llm(email, project_name, sbc_prompt, SERVICE_URLS)
               candidate_code = extract_code(sbc_text)
               if is_valid_python_middleware_code(candidate_code):
                 sbc_code_extracted = candidate_code
@@ -1874,13 +1914,7 @@ if __name__ == "__main__":
                   "Do NOT include any '#include', 'void setup()', or 'void loop()'."
                 )
 
-              vision_resp = requests.post(
-                SERVICE_URLS['gemini']+"/ask_gemini",
-                json={"email":email, "project_name":project_name, "command": vision_prompt + retry_suffix},
-                timeout=180
-              )
-              vision_resp.raise_for_status()
-              vision_code_response = extract_gemini_text(vision_resp.json(), email)
+              vision_code_response = ask_llm(email, project_name, vision_prompt + retry_suffix, SERVICE_URLS)
               if not vision_code_response:
                 last_generation_error = ValueError("Empty/unsupported Gemini response for vision generation")
                 continue
@@ -1954,7 +1988,17 @@ if __name__ == "__main__":
     echo "Starting Installation..."
     echo "Updating system and installing base dependencies..."
     sudo apt-get update
-    sudo apt-get install -y curl git build-essential python3 python3-pip python3-venv python3-opencv
+    sudo apt-get install -y curl git build-essential python3 python3-pip python3-venv python3-opencv libasound2-dev portaudio19-dev sox libsox-fmt-all
+
+    echo "Configuring Audio Peripheral Permissions..."
+    # Ensure current system user belongs to the native audio group for PyAudio/Vosk access
+    if ! groups "$USER" | grep -q "\baudio\b"; then
+        echo "⚙️ Adding user $USER to the 'audio' hardware access group..."
+        sudo usermod -aG audio "$USER"
+        echo "⚠️ Note: You will need to log out and log back in (or restart your terminal session) for group permission updates to apply!"
+    else
+        echo "ℹ️ User $USER is already a member of the 'audio' group."
+    fi
 
     echo "Detecting System Specifications..."
     # Detect Memory
@@ -2024,6 +2068,48 @@ if __name__ == "__main__":
         fi
     fi
 
+    # Arduino CLI Ecosystem Installation Layer
+    echo "Checking Arduino CLI Binary Suite installation..."
+    if ! command -v arduino-cli &> /dev/null; then
+        echo "⚙️ arduino-cli is not present. Executing official installation layer..."
+        curl -fsSL https://raw.githubusercontent.com/arduino/arduino-cli/master/install.sh | sh
+        
+        # Check and handle direct local binary directory output fallback
+        if [ -d "./bin" ]; then
+            sudo cp ./bin/arduino-cli /usr/local/bin/
+            rm -rf ./bin
+        fi
+        
+        if ! command -v arduino-cli &> /dev/null; then
+            echo "❌ Error: Failed to install arduino-cli or bind it into path environment variables." >&2
+            exit 1
+        fi
+    else
+        echo "ℹ️ arduino-cli binary ecosystem is already installed and accessible."
+    fi
+
+    # STM32duino Toolchain Core Platform Setup
+    BOARD_URL="https://github.com/stm32duino/BoardManagerFiles/raw/main/package_stmicroelectronics_index.json"
+    CORE_ID="STMicroelectronics:stm32"
+
+    echo "⚙️ Configuring Arduino CLI Board Manager URL for STM32duino..."
+    # Ensure configuration structure is clean and available before tracking URLs
+    arduino-cli config init --overwrite || true
+
+    if arduino-cli config dump | grep -q "$BOARD_URL"; then
+        echo "ℹ️ STM32duino URL is already present in configuration."
+    else
+        arduino-cli config add board_manager.additional_urls "$BOARD_URL"
+        echo "✅ Successfully added STM32duino URL to configuration."
+    fi
+
+    echo "🔄 Updating platform package indexes..."
+    arduino-cli core update-index
+
+    echo "📥 Installing $CORE_ID hardware architecture toolchain..."
+    arduino-cli core install "$CORE_ID"
+    echo "✅ Toolchain setup complete for STM32 hardware abstraction layers."
+
     # Detect memory requirements specifically before Ollama installation
     echo "Checking memory requirements for Ollama..."
     if [ -n "$TOTAL_MEM" ] && [ "$TOTAL_MEM" -eq "$TOTAL_MEM" ] 2>/dev/null; then
@@ -2053,8 +2139,8 @@ if __name__ == "__main__":
     echo "Upgrading pip inside virtual environment..."
     "$(dirname "$0")/../venv/bin/pip" install --upgrade pip
 
-    echo "Installing YOLOv8 (ultralytics), OpenCV, FastAPI, and Uvicorn inside virtual environment..."
-    "$(dirname "$0")/../venv/bin/pip" install ultralytics opencv-python fastapi uvicorn
+    echo "Installing YOLOv8, OpenCV, FastAPI, Uvicorn, and Audio Core (Vosk, PyAudio)..."
+    "$(dirname "$0")/../venv/bin/pip" install ultralytics opencv-python fastapi uvicorn vosk pyaudio
 
     # Clean up custom pip temp dir
     rm -rf "$PIP_TMP_DIR"
@@ -2146,7 +2232,7 @@ EOF
         mcu_prompt += "### Arduino CLI Verified Library Availability:\n- `arduino-cli` not found on host at generation time; use canonical, widely available Arduino libraries only and avoid non-existent library names.\n"
 
       try:
-        mcu_code_response = requests.post(SERVICE_URLS['gemini']+"/ask_gemini", json={"email":email, "project_name":project_name, "command": mcu_prompt}).json()[email]
+        mcu_code_response = ask_llm(email, project_name, mcu_prompt, SERVICE_URLS)
         print(f"MCU Firmware Generated for {mcu_dev}:\n", mcu_code_response)
         mcu_code_extracted = extract_code(mcu_code_response)
         firmware_dir = os.path.join(get_project_dir(email, project_name), "firmware")
@@ -2203,13 +2289,7 @@ EOF
         middleware_error_reason = ""
         for attempt in range(3):
           try:
-            response = requests.post(
-              SERVICE_URLS['gemini'] + "/ask_gemini",
-              json={"email": email, "project_name": project_name, "command": sbc_prompt},
-              timeout=120,
-            )
-            response.raise_for_status()
-            sbc_text = extract_gemini_text(response.json(), email)
+            sbc_text = ask_llm(email, project_name, sbc_prompt, SERVICE_URLS)
             candidate_code = extract_code(sbc_text)
             if is_valid_python_middleware_code(candidate_code):
               sbc_code_extracted = candidate_code
@@ -2287,7 +2367,7 @@ EOF
             mcu_prompt += "Leave the setup() and loop() structures, and create empty functions for reading sensors and writing actuator commands. Output ONLY the code, with no explanation."
             
             try:
-                mcu_code_response = requests.post(SERVICE_URLS['gemini']+"/ask_gemini", json={"email":email, "project_name":project_name, "command": mcu_prompt}).json()[email]
+                mcu_code_response = ask_llm(email, project_name, mcu_prompt, SERVICE_URLS)
                 print(f"MCU Firmware Generated for {mcu_name}:\n", mcu_code_response)
                 mcu_code_extracted = extract_code(mcu_code_response)
                 firmware_dir = os.path.join(get_project_dir(email, project_name), "firmware")
